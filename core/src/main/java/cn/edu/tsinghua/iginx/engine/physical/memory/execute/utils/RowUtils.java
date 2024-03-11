@@ -170,9 +170,21 @@ public class RowUtils {
     return false;
   }
 
-  public static HashMap<Integer, List<Row>> establishHashMap(
+  public static Map<Integer, List<Row>> establishHashMap(
+      List<Row> rows, String joinPath, boolean needTypeCast) throws PhysicalException {
+    if (config.isEnableParallelOperator()
+        && rows.size() > config.getParallelGroupByRowsThreshold()) {
+      logger.info("join use parallel build, row size: " + rows.size());
+      return parallelEstablishHashMap(rows, joinPath, needTypeCast);
+    } else {
+      logger.info("join use sequence build, row size: " + rows.size());
+      return seqEstablishHashMap(rows, joinPath, needTypeCast);
+    }
+  }
+
+  private static Map<Integer, List<Row>> seqEstablishHashMap(
       List<Row> rows, String joinPath, boolean needTypeCast) {
-    HashMap<Integer, List<Row>> hashMap = new HashMap<>();
+    Map<Integer, List<Row>> map = new HashMap<>();
     for (Row row : rows) {
       Value value = row.getAsValue(joinPath);
       if (value == null) {
@@ -180,10 +192,40 @@ public class RowUtils {
       }
       int hash = getHash(value, needTypeCast);
 
-      List<Row> l = hashMap.computeIfAbsent(hash, k -> new ArrayList<>());
+      List<Row> l = map.computeIfAbsent(hash, k -> new ArrayList<>());
       l.add(row);
     }
-    return hashMap;
+    return map;
+  }
+
+  private static Map<Integer, List<Row>> parallelEstablishHashMap(
+      List<Row> rows, String joinPath, boolean needTypeCast) throws PhysicalException {
+    ForkJoinPool pool = null;
+    try {
+      pool = poolQueue.take();
+      Map<Integer, List<Row>> map =
+          pool.submit(
+                  () ->
+                      Collections.synchronizedList(rows)
+                          .parallelStream()
+                          .collect(
+                              Collectors.groupingBy(
+                                  row -> {
+                                    Value value = row.getAsValue(joinPath);
+                                    if (value == null) {
+                                      return 0; // nullable value hashcode
+                                    }
+                                    return getHash(value, needTypeCast);
+                                  })))
+              .get();
+      return map;
+    } catch (InterruptedException | ExecutionException e) {
+      throw new PhysicalException("parallel build failed");
+    } finally {
+      if (pool != null) {
+        poolQueue.add(pool);
+      }
+    }
   }
 
   /**
@@ -568,9 +610,12 @@ public class RowUtils {
     }
 
     Map<GroupByKey, List<Row>> groups;
-    if (table.getRowSize() > config.getParallelGroupByRowsThreshold()) {
+    if (config.isEnableParallelOperator()
+        && table.getRowSize() > config.getParallelGroupByRowsThreshold()) {
+      logger.info("groupBy use parallel build, row size: " + table.getRowSize());
       groups = parallelBuild(table, colIndex);
     } else {
+      logger.info("groupBy use sequence build, row size: " + table.getRowSize());
       groups = seqBuild(table, colIndex);
     }
 
@@ -581,9 +626,12 @@ public class RowUtils {
       GroupBy groupBy, List<Field> fields, Header header, Map<GroupByKey, List<Row>> groups)
       throws PhysicalException {
 
-    if (groups.size() > config.getParallelApplyFuncGroupsThreshold()) {
+    if (config.isEnableParallelOperator()
+        && groups.size() > config.getParallelApplyFuncGroupsThreshold()) {
+      logger.info("groupBy use parallel apply, row size: " + groups.size());
       parallelApplyFunc(groupBy, fields, header, groups);
     } else {
+      logger.info("groupBy use sequence apply, row size: " + groups.size());
       seqApplyFunc(groupBy, fields, header, groups);
     }
 
@@ -776,7 +824,8 @@ public class RowUtils {
 
   public static List<Row> cacheFilterResult(List<Row> rows, Filter filter)
       throws PhysicalException {
-    if (rows.size() > config.getParallelFilterThreshold()) {
+    if (config.isEnableParallelOperator() && rows.size() > config.getParallelFilterThreshold()) {
+      logger.info("use parallel filter, row size: " + rows.size());
       ForkJoinPool pool = null;
       try {
         pool = poolQueue.take();
@@ -799,6 +848,7 @@ public class RowUtils {
         }
       }
     } else {
+      logger.info("use sequence filter, row size: " + rows.size());
       return rows.stream()
           .filter(
               row -> {

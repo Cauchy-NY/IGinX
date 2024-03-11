@@ -36,6 +36,7 @@ import static cn.edu.tsinghua.iginx.sql.SQLConstant.DOT;
 
 import cn.edu.tsinghua.iginx.conf.Config;
 import cn.edu.tsinghua.iginx.conf.ConfigDescriptor;
+import cn.edu.tsinghua.iginx.engine.distributedquery.coordinator.ConnectManager;
 import cn.edu.tsinghua.iginx.engine.physical.exception.InvalidOperatorParameterException;
 import cn.edu.tsinghua.iginx.engine.physical.exception.PhysicalException;
 import cn.edu.tsinghua.iginx.engine.physical.exception.PhysicalTaskExecuteFailureException;
@@ -58,38 +59,19 @@ import cn.edu.tsinghua.iginx.engine.shared.function.RowMappingFunction;
 import cn.edu.tsinghua.iginx.engine.shared.function.SetMappingFunction;
 import cn.edu.tsinghua.iginx.engine.shared.function.system.Max;
 import cn.edu.tsinghua.iginx.engine.shared.function.system.Min;
-import cn.edu.tsinghua.iginx.engine.shared.operator.AddSchemaPrefix;
-import cn.edu.tsinghua.iginx.engine.shared.operator.BinaryOperator;
-import cn.edu.tsinghua.iginx.engine.shared.operator.CrossJoin;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Distinct;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Downsample;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Except;
-import cn.edu.tsinghua.iginx.engine.shared.operator.GroupBy;
-import cn.edu.tsinghua.iginx.engine.shared.operator.InnerJoin;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Intersect;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Join;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Limit;
-import cn.edu.tsinghua.iginx.engine.shared.operator.MappingTransform;
-import cn.edu.tsinghua.iginx.engine.shared.operator.MarkJoin;
-import cn.edu.tsinghua.iginx.engine.shared.operator.OuterJoin;
-import cn.edu.tsinghua.iginx.engine.shared.operator.PathUnion;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Project;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Rename;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Reorder;
-import cn.edu.tsinghua.iginx.engine.shared.operator.RowTransform;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Select;
-import cn.edu.tsinghua.iginx.engine.shared.operator.SetTransform;
-import cn.edu.tsinghua.iginx.engine.shared.operator.SingleJoin;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Sort;
+import cn.edu.tsinghua.iginx.engine.shared.operator.*;
 import cn.edu.tsinghua.iginx.engine.shared.operator.Sort.SortType;
-import cn.edu.tsinghua.iginx.engine.shared.operator.UnaryOperator;
-import cn.edu.tsinghua.iginx.engine.shared.operator.Union;
-import cn.edu.tsinghua.iginx.engine.shared.operator.ValueToSelectedPath;
 import cn.edu.tsinghua.iginx.engine.shared.operator.filter.Filter;
 import cn.edu.tsinghua.iginx.engine.shared.operator.type.OuterJoinType;
 import cn.edu.tsinghua.iginx.engine.shared.source.EmptySource;
+import cn.edu.tsinghua.iginx.engine.shared.source.IGinXSource;
+import cn.edu.tsinghua.iginx.exceptions.ExecutionException;
+import cn.edu.tsinghua.iginx.exceptions.SessionException;
+import cn.edu.tsinghua.iginx.session.Session;
+import cn.edu.tsinghua.iginx.session.SessionExecuteSubPlanResult;
 import cn.edu.tsinghua.iginx.thrift.DataType;
 import cn.edu.tsinghua.iginx.utils.Bitmap;
+import cn.edu.tsinghua.iginx.utils.FastjsonSerializeUtils;
 import cn.edu.tsinghua.iginx.utils.Pair;
 import cn.edu.tsinghua.iginx.utils.StringUtils;
 import java.nio.charset.StandardCharsets;
@@ -123,7 +105,9 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
   public RowStream executeUnaryOperator(
       UnaryOperator operator, RowStream stream, RequestContext context) throws PhysicalException {
     Table table = transformToTable(stream);
-    table.setContext(context);
+    if (table != null) {
+      table.setContext(context);
+    }
     switch (operator.getType()) {
       case Project:
         return executeProject((Project) operator, table);
@@ -153,6 +137,8 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
         return executeDistinct((Distinct) operator, table);
       case ValueToSelectedPath:
         return executeValueToSelectedPath((ValueToSelectedPath) operator, table);
+      case Load:
+        return executeLoad((Load) operator);
       default:
         throw new UnexpectedOperatorException("unknown unary operator: " + operator.getType());
     }
@@ -193,6 +179,9 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
   }
 
   private Table transformToTable(RowStream stream) throws PhysicalException {
+    if (stream == null) {
+      return null;
+    }
     if (stream instanceof Table) {
       return (Table) stream;
     }
@@ -648,6 +637,46 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
     return new Table(targetHeader, targetRows);
   }
 
+  private RowStream executeLoad(Load load) throws PhysicalException {
+    IGinXSource source = (IGinXSource) load.getSource();
+    Operator subPlan = load.getOperator();
+    String subPlanMsg = FastjsonSerializeUtils.serialize(subPlan);
+
+    Session session = ConnectManager.getInstance().getSession(source);
+    try {
+      SessionExecuteSubPlanResult result = session.executeSubPlan(subPlanMsg);
+      return constructRowStream(result);
+    } catch (SessionException | ExecutionException e) {
+      logger.error("execute load fail, because: ", e);
+      throw new PhysicalException(e);
+    }
+  }
+
+  private RowStream constructRowStream(SessionExecuteSubPlanResult result) {
+    List<String> paths = result.getPaths();
+    List<DataType> dataTypes = result.getDataTypeList();
+    List<List<Object>> values = result.getValues();
+    long[] keys = result.getKeys();
+    boolean hasKey = keys != null;
+
+    assert paths.size() == dataTypes.size();
+    List<Field> fields = new ArrayList<>();
+    for (int i = 0; i < paths.size(); i++) {
+      fields.add(new Field(paths.get(i), dataTypes.get(i)));
+    }
+    Header header = hasKey ? new Header(Field.KEY, fields) : new Header(fields);
+
+    List<Row> rows = new ArrayList<>();
+    for (int i = 0; i < values.size(); i++) {
+      Row row =
+          hasKey
+              ? new Row(header, keys[i], values.get(i).toArray(new Object[0]))
+              : new Row(header, values.get(i).toArray(new Object[0]));
+      rows.add(row);
+    }
+    return new Table(header, rows);
+  }
+
   private RowStream executeJoin(Join join, Table tableA, Table tableB) throws PhysicalException {
     boolean hasIntersect = false;
     Header headerA = tableA.getHeader();
@@ -923,7 +952,7 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
         checkNeedTypeCast(tableA.getRows(), tableB.getRows(), joinPathA, joinPathB);
 
     // 扫描右表建立哈希表
-    HashMap<Integer, List<Row>> rowsBHashMap =
+    Map<Integer, List<Row>> rowsBHashMap =
         establishHashMap(tableB.getRows(), joinPathB, needTypeCast);
 
     // 计算连接之后的header
@@ -1891,7 +1920,7 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
         checkNeedTypeCast(tableA.getRows(), tableB.getRows(), joinPathA, joinPathB);
 
     // 扫描右表建立哈希表
-    HashMap<Integer, List<Row>> rowsBHashMap =
+    Map<Integer, List<Row>> rowsBHashMap =
         establishHashMap(tableB.getRows(), joinPathB, needTypeCast);
 
     Header newHeader =
@@ -2014,7 +2043,7 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
         checkNeedTypeCast(tableA.getRows(), tableB.getRows(), joinPathA, joinPathB);
 
     // 扫描右表建立哈希表
-    HashMap<Integer, List<Row>> rowsBHashMap =
+    Map<Integer, List<Row>> rowsBHashMap =
         establishHashMap(tableB.getRows(), joinPathB, needTypeCast);
 
     // 计算连接之后的header

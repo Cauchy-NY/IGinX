@@ -43,6 +43,8 @@ public class RequestContext {
 
   private String warningMsg;
 
+  private String subPlanMsg;
+
   private void init() {
     this.id = SnowFlakeUtils.getInstance().nextId();
     this.startTime = System.currentTimeMillis();

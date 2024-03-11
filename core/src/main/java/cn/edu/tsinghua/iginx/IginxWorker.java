@@ -34,6 +34,7 @@ import cn.edu.tsinghua.iginx.conf.ConfigDescriptor;
 import cn.edu.tsinghua.iginx.conf.Constants;
 import cn.edu.tsinghua.iginx.engine.ContextBuilder;
 import cn.edu.tsinghua.iginx.engine.StatementExecutor;
+import cn.edu.tsinghua.iginx.engine.distributedquery.worker.SubPlanExecutor;
 import cn.edu.tsinghua.iginx.engine.logical.optimizer.rules.RuleCollection;
 import cn.edu.tsinghua.iginx.engine.physical.PhysicalEngineImpl;
 import cn.edu.tsinghua.iginx.engine.physical.storage.IStorage;
@@ -543,6 +544,14 @@ public class IginxWorker implements IService.Iface {
     RequestContext ctx = contextBuilder.build(req);
     executor.execute(ctx);
     return ctx.getResult().getExecuteSqlResp();
+  }
+
+  @Override
+  public ExecuteSubPlanResp executeSubPlan(ExecuteSubPlanReq req) {
+    SubPlanExecutor executor = SubPlanExecutor.getInstance();
+    RequestContext ctx = contextBuilder.build(req);
+    executor.execute(ctx);
+    return ctx.getResult().getExecuteSubPlanResp();
   }
 
   @Override

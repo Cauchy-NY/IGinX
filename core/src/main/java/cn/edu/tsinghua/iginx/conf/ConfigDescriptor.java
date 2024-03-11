@@ -216,6 +216,8 @@ public class ConfigDescriptor {
           Integer.parseInt(properties.getProperty("minThriftWorkerThreadNum", "20")));
       config.setMaxThriftWrokerThreadNum(
           Integer.parseInt(properties.getProperty("maxThriftWorkerThreadNum", "2147483647")));
+      config.setEnableParallelOperator(
+          Boolean.parseBoolean(properties.getProperty("enableParallelOperator", "true")));
       config.setParallelFilterThreshold(
           Integer.parseInt(properties.getProperty("parallelFilterThreshold", "10000")));
       config.setParallelGroupByRowsThreshold(
@@ -232,6 +234,8 @@ public class ConfigDescriptor {
           Integer.parseInt(properties.getProperty("batchSizeImportCsv", "10000")));
       config.setRuleBasedOptimizer(
           properties.getProperty("ruleBasedOptimizer", "RemoveNotRule=on,FilterFragmentRule=on"));
+      config.setDistributedQueryTriggerThreshold(
+          Integer.parseInt(properties.getProperty("distributedQueryTriggerThreshold", "3")));
     } catch (IOException e) {
       config.setUTTestEnv(true);
       config.setNeedInitBasicUDFFunctions(false);
@@ -339,6 +343,8 @@ public class ConfigDescriptor {
         EnvUtils.loadEnv("historicalPrefixList", config.getHistoricalPrefixList()));
     config.setExpectedStorageUnitNum(
         EnvUtils.loadEnv("expectedStorageUnitNum", config.getExpectedStorageUnitNum()));
+    config.setEnableParallelOperator(
+        EnvUtils.loadEnv("enableParallelOperator", config.isEnableParallelOperator()));
     config.setParallelFilterThreshold(
         EnvUtils.loadEnv("parallelFilterThreshold", config.getParallelFilterThreshold()));
     config.setParallelGroupByRowsThreshold(
@@ -358,6 +364,9 @@ public class ConfigDescriptor {
     config.setUTTestEnv(EnvUtils.loadEnv("ut_test_env", config.isUTTestEnv()));
     config.setRuleBasedOptimizer(
         EnvUtils.loadEnv("ruleBasedOptimizer", config.getRuleBasedOptimizer()));
+    config.setDistributedQueryTriggerThreshold(
+        EnvUtils.loadEnv(
+            "distributedQueryTriggerThreshold", config.getDistributedQueryTriggerThreshold()));
   }
 
   private void loadUDFListFromFile() {
