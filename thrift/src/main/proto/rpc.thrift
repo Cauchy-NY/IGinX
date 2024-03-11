@@ -381,6 +381,7 @@ struct ExecuteSqlResp {
     26: optional string loadCsvPath
     27: optional list<i64> sessionIDList
     28: optional map<string, bool> rules
+    29: optional i64 costTime
 }
 
 struct ExecuteSubPlanReq {

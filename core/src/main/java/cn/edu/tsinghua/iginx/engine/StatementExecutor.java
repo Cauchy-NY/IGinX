@@ -362,12 +362,15 @@ public class StatementExecutor {
 
         before(ctx, prePhysicalProcessors);
         RowStream stream;
+        long startTime = System.currentTimeMillis();
         if (evaluator.needDistributedQuery(root)) {
           Plan plan = splitter.split(root);
           stream = planExecutor.execute(ctx, plan);
         } else {
           stream = engine.execute(ctx, root);
         }
+        long endTime = System.currentTimeMillis();
+        logger.info("engine cost time: " + (endTime - startTime));
         after(ctx, postPhysicalProcessors);
 
         if (type == StatementType.SELECT) {
