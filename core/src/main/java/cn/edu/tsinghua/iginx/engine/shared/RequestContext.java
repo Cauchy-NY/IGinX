@@ -45,6 +45,8 @@ public class RequestContext {
 
   private String subPlanMsg;
 
+  private long engineCostTime;
+
   private void init() {
     this.id = SnowFlakeUtils.getInstance().nextId();
     this.startTime = System.currentTimeMillis();

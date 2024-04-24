@@ -33,12 +33,17 @@ public class NaiveSplitter implements Splitter {
   @Override
   public Plan split(Operator root) {
     List<IginxMeta> availableIginx = new ArrayList<>(metaManager.getIginxList());
+    //    List<IginxMeta> availableIginx = new ArrayList<>();
+    //    availableIginx.add(new IginxMeta(1, "127.0.0.1", 1111, null));
+    //    availableIginx.add(new IginxMeta(1, "127.0.0.1", 2222, null));
+    //    availableIginx.add(new IginxMeta(1, "127.0.0.1", 3333, null));
+    //    availableIginx.add(new IginxMeta(1, "0.0.0.0", 6888, null));
     int k = availableIginx.size() - 1;
 
     Pair<Queue<Operator>, Map<Operator, Operator>> pair = split(root, k);
     Queue<Operator> splitPartQueue = pair.getK();
     Map<Operator, Operator> parents = pair.getV();
-    Map<Integer, Operator> subPlans = new HashMap<>();
+    List<Operator> subPlans = new ArrayList<>();
 
     int index = 0;
     while (!splitPartQueue.isEmpty()) {
@@ -47,8 +52,8 @@ public class NaiveSplitter implements Splitter {
       if (isSelf(iginxMeta)) {
         iginxMeta = availableIginx.get(index++);
       }
-      Load load = new Load(new IGinXSource(iginxMeta.getIp(), iginxMeta.getPort()), op);
-      subPlans.put(op.hashCode(), op);
+      Load load = new Load(new IGinXSource(iginxMeta.getIp(), iginxMeta.getPort()), index, op);
+      subPlans.add(op);
 
       Operator parent = parents.get(op);
       if (parent instanceof UnaryOperator) {

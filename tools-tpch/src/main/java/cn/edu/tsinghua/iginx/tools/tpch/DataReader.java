@@ -1,4 +1,4 @@
-package cn.edu.tsinghua.tools.tpch;
+package cn.edu.tsinghua.iginx.tools.tpch;
 
 import cn.edu.tsinghua.iginx.thrift.DataType;
 import java.util.Arrays;
@@ -10,7 +10,12 @@ public class DataReader {
 
   public static void main(String[] args) {
 
-    String path = "/Users/cauchy-ny/Downloads/cache/tpch-kit/data";
+    assert args.length == 3;
+
+    String path = args[0];
+
+    String host = args[1];
+    int port = Integer.parseInt(args[2]);
 
     Map<String, List<String>> tableColumns = new HashMap<>();
     tableColumns.put(
@@ -162,11 +167,11 @@ public class DataReader {
       List<DataType> types = tableTypes.get(table);
 
       try {
-        reader = new TableReader(path, table, columns, types, 100000);
+        reader = new TableReader(path, table, columns, types, 100000, host, port);
 
         int index = 0;
         System.out.println("loading " + table);
-        while (reader.hasNext() && index < 3) {
+        while (reader.hasNext()) {
           System.out.println("loading " + index++ + " batch");
           reader.loadNextBatch();
         }

@@ -1,4 +1,4 @@
-package cn.edu.tsinghua.tools.tpch;
+package cn.edu.tsinghua.iginx.tools.tpch;
 
 import cn.edu.tsinghua.iginx.exceptions.ExecutionException;
 import cn.edu.tsinghua.iginx.exceptions.SessionException;
@@ -39,7 +39,13 @@ public class TableReader {
   private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
 
   public TableReader(
-      String path, String tableName, List<String> columns, List<DataType> types, int batch)
+      String path,
+      String tableName,
+      List<String> columns,
+      List<DataType> types,
+      int batch,
+      String host,
+      int port)
       throws Exception {
     this.path = path;
     this.tableName = tableName;
@@ -55,7 +61,7 @@ public class TableReader {
     this.reader = new BufferedReader(new InputStreamReader(inputStream));
     this.str = reader.readLine();
 
-    this.session = new Session("127.0.0.1", 6888, "root", "root");
+    this.session = new Session(host, port, "root", "root");
     this.session.openSession();
   }
 

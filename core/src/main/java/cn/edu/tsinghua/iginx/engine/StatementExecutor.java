@@ -355,7 +355,13 @@ public class StatementExecutor {
         if (type == StatementType.SELECT) {
           SelectStatement selectStatement = (SelectStatement) ctx.getStatement();
           if (selectStatement.isNeedLogicalExplain()) {
-            processExplainLogicalStatement(ctx, root);
+            if (evaluator.needDistributedQuery(root)) {
+              //            if (true) {
+              Plan plan = splitter.split(root);
+              processExplainLogicalPlan(ctx, plan);
+            } else {
+              processExplainLogicalStatement(ctx, root);
+            }
             return;
           }
         }
@@ -370,8 +376,10 @@ public class StatementExecutor {
           stream = engine.execute(ctx, root);
         }
         long endTime = System.currentTimeMillis();
-        logger.info("engine cost time: " + (endTime - startTime));
+        long engineCostTime = endTime - startTime;
+        logger.info("engine cost time: " + engineCostTime);
         after(ctx, postPhysicalProcessors);
+        ctx.setEngineCostTime(engineCostTime);
 
         if (type == StatementType.SELECT) {
           SelectStatement selectStatement = (SelectStatement) ctx.getStatement();
@@ -386,6 +394,33 @@ public class StatementExecutor {
       }
     }
     throw new ExecutionException("Execute Error: can not construct a legal logical tree.");
+  }
+
+  private void processExplainLogicalPlan(RequestContext ctx, Plan plan)
+      throws PhysicalException, ExecutionException {
+    List<Field> fields =
+        new ArrayList<>(
+            Arrays.asList(
+                new Field("Logical Tree", DataType.BINARY),
+                new Field("Operator Type", DataType.BINARY),
+                new Field("Operator Info", DataType.BINARY)));
+    Header header = new Header(fields);
+
+    List<Operator> roots = new ArrayList<>();
+    roots.add(plan.getRoot());
+    roots.addAll(plan.getSubPlans());
+
+    int maxLen = 0;
+    List<Object[]> cache = new ArrayList<>();
+    for (int i = 0; i < roots.size(); i++) {
+      Operator root = roots.get(i);
+      cache.add(new Object[] {"[subplan" + i + "]: ", "".getBytes(), "".getBytes()});
+      OperatorInfoVisitor visitor = new OperatorInfoVisitor();
+      root.accept(visitor);
+      maxLen = Math.max(maxLen, visitor.getMaxLen());
+      cache.addAll(visitor.getCache());
+    }
+    formatTree(ctx, header, cache, maxLen);
   }
 
   private void processExplainLogicalStatement(RequestContext ctx, Operator root)

@@ -1,15 +1,15 @@
 package cn.edu.tsinghua.iginx.engine.distributedquery.coordinator;
 
 import cn.edu.tsinghua.iginx.engine.shared.operator.Operator;
-import java.util.Map;
+import java.util.List;
 
 public class Plan {
 
   private final Operator root;
 
-  private final Map<Integer, Operator> subPlans;
+  private final List<Operator> subPlans;
 
-  public Plan(Operator root, Map<Integer, Operator> subPlans) {
+  public Plan(Operator root, List<Operator> subPlans) {
     this.root = root;
     this.subPlans = subPlans;
   }
@@ -19,6 +19,11 @@ public class Plan {
   }
 
   private Operator getSubPlan(int id) {
-    return subPlans.get(id);
+    assert id <= subPlans.size();
+    return subPlans.get(id - 1);
+  }
+
+  public List<Operator> getSubPlans() {
+    return subPlans;
   }
 }

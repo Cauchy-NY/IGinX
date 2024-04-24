@@ -85,6 +85,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ForkJoinPool;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -927,11 +929,13 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
         innerJoin.getPrefixB());
 
     // 检查左右两表需要进行额外连接的path
-    List<String> extraJoinPaths = new ArrayList<>();
+    List<String> extraJoinPaths;
     if (!innerJoin.getExtraJoinPrefix().isEmpty()) {
       extraJoinPaths =
           getSamePathWithSpecificPrefix(
               tableA.getHeader(), tableB.getHeader(), innerJoin.getExtraJoinPrefix());
+    } else {
+      extraJoinPaths = new ArrayList<>();
     }
 
     // 计算建立和访问哈希表所用的path
@@ -966,41 +970,131 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
             joinColumns,
             extraJoinPaths);
 
-    List<Row> transformedRows = new ArrayList<>();
-    for (Row rowA : tableA.getRows()) {
-      Value value = rowA.getAsValue(joinPathA);
-      if (value.isNull()) {
-        continue;
-      }
-      int hash = getHash(value, needTypeCast);
+    List<Row> transformedRows = Collections.synchronizedList(new ArrayList<>());
 
-      if (rowsBHashMap.containsKey(hash)) {
-        for (Row rowB : rowsBHashMap.get(hash)) {
-          if (!equalOnSpecificPaths(rowA, rowB, extraJoinPaths)) {
-            continue;
-          } else if (!equalOnSpecificPaths(
-              rowA, rowB, innerJoin.getPrefixA(), innerJoin.getPrefixB(), joinColumns)) {
-            continue;
-          }
-          Row joinedRow =
-              RowUtils.constructNewRow(
-                  newHeader,
-                  rowA,
-                  rowB,
-                  innerJoin.getPrefixA(),
-                  innerJoin.getPrefixB(),
-                  true,
-                  joinColumns,
-                  extraJoinPaths);
-          if (innerJoin.getFilter() != null) {
-            if (!FilterUtils.validate(innerJoin.getFilter(), joinedRow)) {
+    String use;
+    long startTime = System.currentTimeMillis();
+    if (config.isEnableParallelOperator()
+        && tableA.getRowSize() > config.getParallelGroupByRowsThreshold()) {
+      use = "parallel";
+      CountDownLatch latch = new CountDownLatch(1);
+      ForkJoinPool pool = null;
+      try {
+        pool = RowUtils.poolQueue.take();
+        pool.submit(
+            () -> {
+              Collections.synchronizedList(tableA.getRows())
+                  .parallelStream()
+                  .forEach(
+                      rowA -> {
+                        Value value = rowA.getAsValue(joinPathA);
+                        if (value.isNull()) {
+                          return;
+                        }
+                        int hash = getHash(value, needTypeCast);
+
+                        if (rowsBHashMap.containsKey(hash)) {
+                          for (Row rowB : rowsBHashMap.get(hash)) {
+                            try {
+                              if (!equalOnSpecificPaths(rowA, rowB, extraJoinPaths)) {
+                                continue;
+                              } else {
+                                try {
+                                  if (!equalOnSpecificPaths(
+                                      rowA,
+                                      rowB,
+                                      innerJoin.getPrefixA(),
+                                      innerJoin.getPrefixB(),
+                                      joinColumns)) {
+                                    continue;
+                                  }
+                                } catch (PhysicalException e) {
+                                  throw new RuntimeException(e);
+                                }
+                              }
+                            } catch (PhysicalException e) {
+                              throw new RuntimeException(e);
+                            }
+                            Row joinedRow =
+                                RowUtils.constructNewRow(
+                                    newHeader,
+                                    rowA,
+                                    rowB,
+                                    innerJoin.getPrefixA(),
+                                    innerJoin.getPrefixB(),
+                                    true,
+                                    joinColumns,
+                                    extraJoinPaths);
+                            if (innerJoin.getFilter() != null) {
+                              try {
+                                if (!FilterUtils.validate(innerJoin.getFilter(), joinedRow)) {
+                                  continue;
+                                }
+                              } catch (PhysicalException e) {
+                                throw new RuntimeException(e);
+                              }
+                            }
+                            transformedRows.add(joinedRow);
+                          }
+                        }
+                      });
+              latch.countDown();
+            });
+
+        try {
+          latch.await();
+        } catch (InterruptedException e) {
+          throw new PhysicalException("Interrupt when latch await ", e);
+        }
+      } catch (InterruptedException e) {
+        throw new PhysicalException("Interrupt when parallel apply func", e);
+      } finally {
+        if (pool != null) {
+          RowUtils.poolQueue.add(pool);
+        }
+      }
+    } else {
+      use = "sequence";
+      for (Row rowA : tableA.getRows()) {
+        Value value = rowA.getAsValue(joinPathA);
+        if (value.isNull()) {
+          continue;
+        }
+        int hash = getHash(value, needTypeCast);
+
+        if (rowsBHashMap.containsKey(hash)) {
+          for (Row rowB : rowsBHashMap.get(hash)) {
+            if (!equalOnSpecificPaths(rowA, rowB, extraJoinPaths)) {
+              continue;
+            } else if (!equalOnSpecificPaths(
+                rowA, rowB, innerJoin.getPrefixA(), innerJoin.getPrefixB(), joinColumns)) {
               continue;
             }
+            Row joinedRow =
+                RowUtils.constructNewRow(
+                    newHeader,
+                    rowA,
+                    rowB,
+                    innerJoin.getPrefixA(),
+                    innerJoin.getPrefixB(),
+                    true,
+                    joinColumns,
+                    extraJoinPaths);
+            if (innerJoin.getFilter() != null) {
+              if (!FilterUtils.validate(innerJoin.getFilter(), joinedRow)) {
+                continue;
+              }
+            }
+            transformedRows.add(joinedRow);
           }
-          transformedRows.add(joinedRow);
         }
       }
     }
+    long endTime = System.currentTimeMillis();
+    logger.info(
+        String.format(
+            "inner join use %s probe, row size: %s, cost time: %s",
+            use, tableA.getRowSize(), endTime - startTime));
     return new Table(newHeader, transformedRows);
   }
 
@@ -1420,6 +1514,7 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
 
     HashMap<Integer, List<Row>> rowsBHashMap = new HashMap<>();
     HashMap<Integer, List<Integer>> indexOfRowBHashMap = new HashMap<>();
+
     for (int indexB = 0; indexB < rowsB.size(); indexB++) {
       Value value = rowsB.get(indexB).getAsValue(joinPathB);
       if (value.isNull()) {
@@ -1895,11 +1990,13 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
   private RowStream executeHashSingleJoin(SingleJoin singleJoin, Table tableA, Table tableB)
       throws PhysicalException {
     // 检查左右两表需要进行额外连接的path
-    List<String> extraJoinPaths = new ArrayList<>();
+    List<String> extraJoinPaths;
     if (!singleJoin.getExtraJoinPrefix().isEmpty()) {
       extraJoinPaths =
           getSamePathWithSpecificPrefix(
               tableA.getHeader(), tableB.getHeader(), singleJoin.getExtraJoinPrefix());
+    } else {
+      extraJoinPaths = new ArrayList<>();
     }
 
     // 计算建立和访问哈希表所用的path
@@ -1926,41 +2023,122 @@ public class NaiveOperatorMemoryExecutor implements OperatorMemoryExecutor {
     Header newHeader =
         constructNewHead(tableA.getHeader(), tableB.getHeader(), true, extraJoinPaths);
 
-    List<Row> transformedRows = new ArrayList<>();
+    List<Row> transformedRows = Collections.synchronizedList(new ArrayList<>());
     int anotherRowSize = tableB.getHeader().getFieldSize();
-    for (Row rowA : tableA.getRows()) {
-      Value value = rowA.getAsValue(joinPathA);
-      if (value.isNull()) {
-        continue;
-      }
-      int hash = getHash(value, needTypeCast);
 
-      boolean matched = false;
-      if (rowsBHashMap.containsKey(hash)) {
-        for (Row rowB : rowsBHashMap.get(hash)) {
-          if (!equalOnSpecificPaths(rowA, rowB, extraJoinPaths)) {
-            continue;
-          }
-          Row joinedRow = RowUtils.constructNewRow(newHeader, rowA, rowB, true, extraJoinPaths);
-          if (singleJoin.getFilter() != null) {
-            if (!FilterUtils.validate(singleJoin.getFilter(), joinedRow)) {
-              continue;
-            }
-          }
-          if (matched) {
-            throw new PhysicalException("the return value of sub-query has more than one rows");
-          }
-          matched = true;
-          transformedRows.add(joinedRow);
+    String use;
+    long startTime = System.currentTimeMillis();
+    if (config.isEnableParallelOperator()
+        && tableA.getRowSize() > config.getParallelGroupByRowsThreshold()) {
+      use = "parallel";
+      CountDownLatch latch = new CountDownLatch(1);
+      ForkJoinPool pool = null;
+      try {
+        pool = RowUtils.poolQueue.take();
+        pool.submit(
+            () -> {
+              Collections.synchronizedList(tableA.getRows())
+                  .parallelStream()
+                  .forEach(
+                      rowA -> {
+                        Value value = rowA.getAsValue(joinPathA);
+                        if (value.isNull()) {
+                          return;
+                        }
+                        int hash = getHash(value, needTypeCast);
+
+                        boolean matched = false;
+                        if (rowsBHashMap.containsKey(hash)) {
+                          for (Row rowB : rowsBHashMap.get(hash)) {
+                            try {
+                              if (!equalOnSpecificPaths(rowA, rowB, extraJoinPaths)) {
+                                continue;
+                              }
+                            } catch (PhysicalException e) {
+                              throw new RuntimeException(e);
+                            }
+                            Row joinedRow =
+                                RowUtils.constructNewRow(
+                                    newHeader, rowA, rowB, true, extraJoinPaths);
+                            if (singleJoin.getFilter() != null) {
+                              try {
+                                if (!FilterUtils.validate(singleJoin.getFilter(), joinedRow)) {
+                                  continue;
+                                }
+                              } catch (PhysicalException e) {
+                                throw new RuntimeException(e);
+                              }
+                            }
+                            if (matched) {
+                              throw new RuntimeException(
+                                  "the return value of sub-query has more than one rows");
+                            }
+                            matched = true;
+                            transformedRows.add(joinedRow);
+                          }
+                        }
+                        if (!matched) {
+                          Row unmatchedRow =
+                              RowUtils.constructUnmatchedRow(
+                                  newHeader, rowA, singleJoin.getPrefixA(), anotherRowSize, true);
+                          transformedRows.add(unmatchedRow);
+                        }
+                      });
+              latch.countDown();
+            });
+        try {
+          latch.await();
+        } catch (InterruptedException e) {
+          throw new PhysicalException("Interrupt when latch await ", e);
+        }
+      } catch (InterruptedException e) {
+        throw new PhysicalException("Interrupt when parallel apply func", e);
+      } finally {
+        if (pool != null) {
+          RowUtils.poolQueue.add(pool);
         }
       }
-      if (!matched) {
-        Row unmatchedRow =
-            RowUtils.constructUnmatchedRow(
-                newHeader, rowA, singleJoin.getPrefixA(), anotherRowSize, true);
-        transformedRows.add(unmatchedRow);
+    } else {
+      use = "sequence";
+      for (Row rowA : tableA.getRows()) {
+        Value value = rowA.getAsValue(joinPathA);
+        if (value.isNull()) {
+          continue;
+        }
+        int hash = getHash(value, needTypeCast);
+
+        boolean matched = false;
+        if (rowsBHashMap.containsKey(hash)) {
+          for (Row rowB : rowsBHashMap.get(hash)) {
+            if (!equalOnSpecificPaths(rowA, rowB, extraJoinPaths)) {
+              continue;
+            }
+            Row joinedRow = RowUtils.constructNewRow(newHeader, rowA, rowB, true, extraJoinPaths);
+            if (singleJoin.getFilter() != null) {
+              if (!FilterUtils.validate(singleJoin.getFilter(), joinedRow)) {
+                continue;
+              }
+            }
+            if (matched) {
+              throw new PhysicalException("the return value of sub-query has more than one rows");
+            }
+            matched = true;
+            transformedRows.add(joinedRow);
+          }
+        }
+        if (!matched) {
+          Row unmatchedRow =
+              RowUtils.constructUnmatchedRow(
+                  newHeader, rowA, singleJoin.getPrefixA(), anotherRowSize, true);
+          transformedRows.add(unmatchedRow);
+        }
       }
     }
+    long endTime = System.currentTimeMillis();
+    logger.info(
+        String.format(
+            "single join use %s probe, row size: %s, cost time: %s",
+            use, tableA.getRowSize(), endTime - startTime));
     return new Table(newHeader, transformedRows);
   }
 

@@ -7,8 +7,11 @@ public class Load extends AbstractUnaryOperator {
 
   private final Operator operator;
 
-  public Load(Source source, Operator operator) {
+  private final int index;
+
+  public Load(Source source, int index, Operator operator) {
     super(OperatorType.Load, source);
+    this.index = index;
     this.operator = operator;
   }
 
@@ -18,16 +21,16 @@ public class Load extends AbstractUnaryOperator {
 
   @Override
   public Operator copy() {
-    return new Load(getSource().copy(), operator.copy());
+    return new Load(getSource().copy(), index, operator.copy());
   }
 
   @Override
   public String getInfo() {
-    return getSource().toString();
+    return "Load" + index + ": " + getSource().toString();
   }
 
   @Override
   public UnaryOperator copyWithSource(Source source) {
-    return new Load(source, operator.copy());
+    return new Load(source, index, operator.copy());
   }
 }
