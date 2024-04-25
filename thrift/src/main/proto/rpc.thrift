@@ -381,6 +381,21 @@ struct ExecuteSqlResp {
     26: optional string loadCsvPath
     27: optional list<i64> sessionIDList
     28: optional map<string, bool> rules
+    29: optional i64 costTime
+}
+
+struct ExecuteSubPlanReq {
+    1: required i64 sessionId
+    2: required string subPlan
+}
+
+struct ExecuteSubPlanResp {
+    1: required Status status
+    2: optional list<string> paths
+    3: optional list<map<string, string>> tagsList
+    4: optional list<DataType> dataTypeList
+    5: optional binary keys
+    6: optional QueryDataSet queryDataSet
 }
 
 struct UpdateUserReq {
@@ -764,4 +779,6 @@ service IService {
     ShowRulesResp showRules(1: ShowRulesReq req);
 
     Status setRules(1: SetRulesReq req);
+
+    ExecuteSubPlanResp executeSubPlan(1: ExecuteSubPlanReq req);
 }
